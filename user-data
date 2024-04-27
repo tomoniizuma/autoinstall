@@ -1,0 +1,165 @@
+#cloud-config
+autoinstall:
+  version: 1
+  identity:
+    hostname: kvm01
+    username: ubuntu
+  early-commands: []
+  refresh-installer:
+    update: yes
+  storage:
+    swap:
+      size: 0
+    config:
+      - id: root-ssd
+        type: disk
+        ptable: gpt
+        match:
+          size: largest
+        wipe: superblock-recursive
+        preserve: false
+        grub_device: true
+        name: "CrucialSSD"
+      - id: partition-1
+        type: partition
+        size: 256M
+        number: 1
+        device: root-ssd
+        wipe: superblock
+        flag: boot
+        preserve: false
+        grub_device: true
+      - id: partition-2
+        type: partition
+        size: 2G
+        number: 2
+        device: root-ssd
+        wipe: superblock
+        flag: swap
+        preserve: false
+      - id: partition-3
+        type: partition
+        size: 100G
+        number: 3
+        device: root-ssd
+        wipe: superblock
+        preserve: false
+      - id: partition-4
+        type: partition
+        size: -1
+        number: 4
+        device: root-ssd
+        wipe: superblock
+        preserve: false
+      - id: format-1
+        type: format
+        fstype: fat32
+        volume: partition-1
+        label: ESP
+        preserve: false
+      - id: format-2
+        type: format
+        fstype: swap
+        volume: partition-2
+        label: SWAP
+        flag: swap
+        preserve: false
+      - id: format-3
+        type: format
+        fstype: ext4
+        volume: partition-3
+        label: ROOT
+        preserve: false
+      - id: format-4
+        type: format
+        fstype: btrfs
+        volume: partition-4
+        label: LIBVIRTPOOL
+        preserve: false
+      - id: format-1-efi
+        type: mount
+        path: /boot/efi
+        device: format-1
+      - id: format-2-swap
+        type: mount
+        path: none
+        device: format-2
+        options: pri=1,discard=pages
+      - id: format-3-root
+        type: mount
+        path: /
+        device: format-3
+        options: "noatime,errors=remount-ro"
+  ssh:
+    install-server: true
+    allow-pw: true
+    authorized-keys:
+      - "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILgcfDr+Q+nF8VZSPiCsK3mcGe1AaV5A4+E6FhpiafxL tomoniizuma@gmail.com"
+  timezone: Asia/Tokyo
+  late-commands:
+    - |
+      cat <<EOF | sudo tee /target/etc/systemd/network/enp86s0.network
+      [Match]
+      Name=enp86s0
+
+      [Network]
+      Address=192.168.88.9/24
+      Gateway=192.168.88.1
+      DNS=192.168.88.1
+      EOF
+    - |
+      cat <<EOF | sudo tee /target/etc/systemd/timesyncd.conf
+      [Time]
+      NTP=ntp.nict.jp
+      FallbackNTP=ntp1.jst.mfeed.ad.jp ntp2.jst.mfeed.ad.jp ntp3.jst.mfeed.ad.jp
+      #RootDistanceMaxSec=5
+      #PollIntervalMinSec=32
+      #PollIntervalMaxSec=2048
+      EOF
+    - curtin in-target --target=/target -- systemctl enable systemd-networkd.service
+    - curtin in-target --target=/target -- apt purge -y netplan.io
+    - curtin in-target --target=/target -- rm /etc/netplan/*.yaml
+    - curtin in-target --target=/target -- useradd -m -s /usr/bin/bash niizuma
+    - curtin in-target --target=/target -- usermod -G sudo niizuma
+    - |
+      cat <<EOF | sudo tee /target/etc/sudoers.d/99-user-ubuntu
+      ubuntu ALL=(ALL:ALL) NOPASSWD: ALL
+      niizuma ALL=(ALL:ALL) NOPASSWD: ALL
+      EOF
+    - curtin in-target --target=/target -- usermod -G sudo niizuma
+    - curtin in-target --target=/target -- sudo -u niizuma mkdir -p /home/niizuma/.ssh
+    - |
+      cat <<EOF | sudo tee /target/home/niizuma/.ssh/authorized_keys
+      ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILgcfDr+Q+nF8VZSPiCsK3mcGe1AaV5A4+E6FhpiafxL tomoniizuma@gmail.com
+      EOF
+    - curtin in-target --target=/target -- sudo chown -R niizuma:niizuma /home/niizuma/.ssh
+    - echo "UUID=$(blkid -s UUID -o value $(blkid -L LIBVIRTPOOL)) /libvirt btrfs defaults 0 0" >> /target/etc/fstab
+    - curtin in-target --target=/target -- timedatectl set-timezone Asia/Tokyo
+    # kvm and misc tools
+    - curtin in-target --target=/target -- apt-get update
+    - curtin in-target --target=/target -- apt-get -y install qemu-kvm libvirt-daemon bridge-utils virtinst libvirt-daemon-system
+    - curtin in-target --target=/target -- apt-get -y install build-essential net-tools
+    # go
+    - curl -L -o go-latest.linux-amd64.tar.gz https://go.dev/dl/$(curl 'https:/go.dev/VERSION?m=text').linux-amd64.tar.gz
+    - tar -C /target/usr/local -xzf go-latest.linux-amd64.tar.gz
+    - echo "export PATH=$PATH:/usr/local/go/bin" >> /target/etc/profile
+    # kubectl
+    - curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+    - sudo install -o root -g root -m 0755 kubectl /target/usr/local/bin/kubectl
+    # terraform
+    - curtin in-target --target=/target -- apt-get install -y gnupg software-properties-common
+    - curtin in-target --target=/target -- wget -O- https://apt.releases.hashicorp.com/gpg | gpg --dearmor | sudo tee /usr/share/keyrings/hashicorp-archive-keyring.gpg
+    - echo "deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com $(lsb_release -cs) main" | sudo tee /target/etc/apt/sources.list.d/hashicorp.list
+    - curtin in-target --target=/target -- apt update
+    - curtin in-target --target=/target -- apt-get install -y terraform mkisofs
+    - curtin in-target --target=/target -- systemctl stop apparmor
+    - curtin in-target --target=/target -- systemctl disable apparmor
+
+    # tailscale
+    - echo 'net.ipv4.ip_forward = 1' | sudo tee -a /target/etc/sysctl.d/99-tailscale.conf
+    - echo 'net.ipv6.conf.all.forwarding = 1' | sudo tee -a /target/etc/sysctl.d/99-tailscale.conf
+    - curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/jammy.noarmor.gpg | sudo tee /target/usr/share/keyrings/tailscale-archive-keyring.gpg >/dev/null
+    - curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/jammy.tailscale-keyring.list | sudo tee /target/etc/apt/sources.list.d/tailscale.list
+    - curtin in-target --target=/target -- apt-get update
+    - curtin in-target --target=/target -- apt-get -y tailscale
+    # do manually sudo tailscale up --advertise-routes=10.0.0.0/8,192.168.88.0/24 after installation
